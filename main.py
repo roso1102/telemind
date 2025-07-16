@@ -166,7 +166,7 @@ async def get_user_data(user_id: str) -> dict:
             "tasks": [],
             "files": [],
             "conversation": [],
-            "created_at": firestore.SERVER_TIMESTAMP
+            "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
         }
         await loop.run_in_executor(None, lambda: doc_ref.set(default_data))
         return default_data
@@ -180,6 +180,12 @@ async def update_user_data(user_id: str, data: dict, merge: bool = True):
 
 async def add_to_user_array(user_id: str, field: str, value: Any):
     """Add an item to a user's array field"""
+    # Convert any SERVER_TIMESTAMP values to actual timestamps before storing
+    if isinstance(value, dict):
+        for k, v in list(value.items()):
+            if isinstance(v, object) and hasattr(v, "__class__") and "Sentinel" in str(v.__class__):
+                value[k] = time.time()
+    
     loop = asyncio.get_event_loop()
     doc_ref = db.collection("users").document(str(user_id))
     await loop.run_in_executor(None, 
@@ -371,7 +377,7 @@ Just chat naturally with me!
                         "due_time": task_info.get("due_time"),
                         "priority": task_info.get("priority", "medium"),
                         "completed": False,
-                        "created_at": firestore.SERVER_TIMESTAMP
+                        "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
                     }
                     
                     await add_to_user_array(user_id, "tasks", task_data)
@@ -435,14 +441,13 @@ Just chat naturally with me!
                 
                 # Try OCR
                 text = await extract_text_from_image(local_path)
-                if text:
-                    # Store text content for search
-                    img_data = {
-                        "name": file_name,
-                        "text": text,
-                        "url": file_url,
-                        "created_at": firestore.SERVER_TIMESTAMP
-                    }
+                if text:                # Store text content for search
+                img_data = {
+                    "name": file_name,
+                    "text": text,
+                    "url": file_url,
+                    "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
+                }
                     
                     # Add to user's documents collection
                     loop = asyncio.get_event_loop()
@@ -497,7 +502,7 @@ Just chat naturally with me!
                     "name": file_name,
                     "text": text,
                     "url": file_url,
-                    "created_at": firestore.SERVER_TIMESTAMP
+                    "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
                 }
                 
                 # Add to user's documents collection
@@ -655,7 +660,7 @@ async def process_document(user_id: str, file_path: str, file_name: str) -> str:
             pdf_data = {
                 "name": file_name,
                 "text": text,
-                "created_at": firestore.SERVER_TIMESTAMP
+                "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
             }
             
             # Store file in Firebase Storage
