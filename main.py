@@ -569,6 +569,9 @@ Just chat naturally with me!
         # Default: process as conversation
         response = await process_conversation(user_id, text)
         await send_message(chat_id, response)
+    except Exception as e:
+        log(f"Error processing text message: {e}", level="ERROR")
+        await send_message(chat_id, "Sorry, I encountered an error processing your message. Please try again.")
     
     # Handle document/file uploads
     elif "document" in message:
