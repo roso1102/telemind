@@ -646,14 +646,49 @@ async def extract_task_info(text: str) -> dict:
         "priority": "medium"  # Default priority
     }
 
-async def process_document(user_id: str, file_path: str, file_name: str) -> str:
-    """Process a PDF document and extract text"""
+async def process_document(user_id: str, file_path: str, file_name: str, max_chars: int = 50000, max_pages: int = None) -> str:
+    """Process a PDF document and extract text with limits for token management"""
     try:
-        # Extract text from PDF
+        # Extract text from PDF with limits
         text = ""
+        total_pages = 0
+        processed_pages = 0
+        char_count = 0
+        
         with fitz.open(file_path) as doc:
-            for page in doc:
-                text += page.get_text()
+            total_pages = len(doc)
+            
+            # Apply page limit if specified
+            if max_pages is None:
+                max_pages = total_pages
+            else:
+                max_pages = min(max_pages, total_pages)
+                
+            # Process pages up to the limit
+            for page_num in range(max_pages):
+                page = doc[page_num]
+                page_text = page.get_text().strip()
+                page_char_count = len(page_text)
+                
+                # Check if we'll exceed the character limit
+                remaining_chars = max_chars - char_count
+                if page_char_count > remaining_chars:
+                    # Only add text up to the limit
+                    text += page_text[:remaining_chars]
+                    char_count += remaining_chars
+                    processed_pages += 1
+                    log(f"Character limit reached ({max_chars}). Stopped at page {page_num + 1} of {total_pages}.")
+                    break
+                else:
+                    # Add the whole page text
+                    text += page_text + "\n\n"
+                    char_count += page_char_count
+                    processed_pages += 1
+                
+                # Check if we've hit the character limit
+                if char_count >= max_chars:
+                    log(f"Character limit reached ({max_chars}). Stopped at page {page_num + 1} of {total_pages}.")
+                    break
         
         # Store the extracted text in Firestore
         if text:
@@ -661,6 +696,9 @@ async def process_document(user_id: str, file_path: str, file_name: str) -> str:
             pdf_data = {
                 "name": file_name,
                 "text": text,
+                "pages_total": total_pages,
+                "pages_processed": processed_pages,
+                "char_count": char_count,
                 "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
             }
             
@@ -673,7 +711,12 @@ async def process_document(user_id: str, file_path: str, file_name: str) -> str:
             doc_ref = db.collection("users").document(str(user_id)).collection("document_contents")
             await loop.run_in_executor(None, lambda: doc_ref.add(pdf_data))
             
-            return f"📄 Document saved: {file_name}\n\nExtracted {len(text)} characters of text."
+            # Prepare response message
+            truncated_msg = ""
+            if processed_pages < total_pages:
+                truncated_msg = f" (Note: Only processed {processed_pages} of {total_pages} pages due to size limits)"
+            
+            return f"📄 Document saved: {file_name}\n\nExtracted {char_count} characters of text{truncated_msg}."
         else:
             return f"📄 Document saved: {file_name}\n\nNo text could be extracted."
     except Exception as e:
