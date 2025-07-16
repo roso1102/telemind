@@ -210,7 +210,7 @@ async def store_file(user_id: str, file_path: str, file_name: str, file_type: st
         "type": file_type,
         "url": url,
         "path": destination_path,
-        "uploaded_at": firestore.SERVER_TIMESTAMP
+        "uploaded_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
     }
     await add_to_user_array(user_id, "files", file_data)
     
