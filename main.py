@@ -88,8 +88,12 @@ async def send_message(chat_id: int, text: str):
 
 # --- Firebase Initialization ---
 try:
-    # Check if Firebase service account is provided as env variable
+    # Check for environment variables
     firebase_service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT")
+    firebase_storage_bucket = os.getenv("FIREBASE_STORAGE_BUCKET", "telemindbot-f271b.appspot.com")
+    
+    log(f"Using Firebase storage bucket: {firebase_storage_bucket}")
+    
     if firebase_service_account:
         # Create temporary file with the service account JSON
         import tempfile
@@ -97,9 +101,10 @@ try:
         with os.fdopen(fd, 'w') as tmp:
             tmp.write(firebase_service_account)
         
+        log("Initializing Firebase with service account from environment variable")
         cred = credentials.Certificate(path)
         firebase_admin.initialize_app(cred, {
-            'storageBucket': 'telemindbot-f271b.appspot.com'  # Your bucket name
+            'storageBucket': firebase_storage_bucket
         })
         
         # Clean up the temporary file
@@ -107,24 +112,41 @@ try:
     else:
         # If running on local development with file
         try:
+            log("Attempting to initialize Firebase with local service account file")
             cred = credentials.Certificate("firebase_service_account.json")
             firebase_admin.initialize_app(cred, {
-                'storageBucket': 'telemindbot-f271b.appspot.com'  # Your bucket name
+                'storageBucket': firebase_storage_bucket
             })
         except Exception as e:
             log(f"Local Firebase initialization error: {e}", level="ERROR")
             # Last resort - try app default credentials
-            firebase_admin.initialize_app()
+            log("Attempting to initialize Firebase with default credentials")
+            firebase_admin.initialize_app(options={
+                'storageBucket': firebase_storage_bucket
+            })
 except Exception as e:
     log(f"Firebase initialization error: {e}", level="ERROR")
     try:
+        # Try one more time without options
         firebase_admin.initialize_app()
+        log("Firebase initialized without storage options - storage functionality may not work", level="WARNING")
     except ValueError:
         log("Firebase app already initialized", level="WARNING")
 
-# Initialize Firestore
+# Initialize Firestore and Storage
 db = firestore.client()
-bucket = firebase_storage.bucket()
+try:
+    bucket = firebase_storage.bucket()
+    log(f"Firebase Storage bucket initialized: {bucket.name}")
+except Exception as e:
+    log(f"Error initializing Firebase Storage bucket: {e}", level="ERROR")
+    # Create a placeholder bucket object for graceful degradation
+    class PlaceholderBucket:
+        def __init__(self):
+            self.name = "placeholder-no-storage-available"
+        def blob(self, *args, **kwargs):
+            raise ValueError("Firebase Storage is not properly configured")
+    bucket = PlaceholderBucket()
 
 # --- FastAPI app ---
 app = FastAPI()
@@ -193,28 +215,46 @@ async def add_to_user_array(user_id: str, field: str, value: Any):
 
 async def store_file(user_id: str, file_path: str, file_name: str, file_type: str) -> str:
     """Store file in Firebase Storage and return URL"""
-    # Upload to Firebase Storage
-    destination_path = f"users/{user_id}/{file_type}/{file_name}"
-    blob = bucket.blob(destination_path)
-    
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: blob.upload_from_filename(file_path))
-    
-    # Make publicly accessible and get URL
-    await loop.run_in_executor(None, lambda: blob.make_public())
-    url = blob.public_url
-    
-    # Store metadata in Firestore
-    file_data = {
-        "name": file_name,
-        "type": file_type,
-        "url": url,
-        "path": destination_path,
-        "uploaded_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
-    }
-    await add_to_user_array(user_id, "files", file_data)
-    
-    return url
+    try:
+        # Log storage attempt
+        log(f"Attempting to store file: {file_name} for user {user_id}")
+        log(f"Firebase bucket name: {bucket.name}")
+        
+        # Check if the file exists
+        if not os.path.exists(file_path):
+            log(f"File not found at path: {file_path}", level="ERROR")
+            return ""
+        
+        # Upload to Firebase Storage
+        destination_path = f"users/{user_id}/{file_type}/{file_name}"
+        blob = bucket.blob(destination_path)
+        
+        # Log the upload attempt
+        log(f"Uploading file to {destination_path}")
+        
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: blob.upload_from_filename(file_path))
+        
+        # Make publicly accessible and get URL
+        await loop.run_in_executor(None, lambda: blob.make_public())
+        url = blob.public_url
+        log(f"File uploaded successfully. Public URL: {url}")
+        
+        # Store metadata in Firestore
+        file_data = {
+            "name": file_name,
+            "type": file_type,
+            "url": url,
+            "path": destination_path,
+            "uploaded_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
+        }
+        await add_to_user_array(user_id, "files", file_data)
+        
+        return url
+    except Exception as e:
+        log(f"Error storing file in Firebase: {e}", level="ERROR")
+        # Return a local file path as fallback
+        return file_path  # Return the local path as a fallback
 
 # --- API endpoints ---
 @app.get("/", response_model=dict)
@@ -649,6 +689,8 @@ async def extract_task_info(text: str) -> dict:
 async def process_document(user_id: str, file_path: str, file_name: str, max_chars: int = 50000, max_pages: int = None) -> str:
     """Process a PDF document and extract text with limits for token management"""
     try:
+        log(f"Processing document: {file_name} for user {user_id}")
+        
         # Extract text from PDF with limits
         text = ""
         total_pages = 0
@@ -657,6 +699,7 @@ async def process_document(user_id: str, file_path: str, file_name: str, max_cha
         
         with fitz.open(file_path) as doc:
             total_pages = len(doc)
+            log(f"PDF has {total_pages} pages")
             
             # Apply page limit if specified
             if max_pages is None:
@@ -692,6 +735,8 @@ async def process_document(user_id: str, file_path: str, file_name: str, max_cha
         
         # Store the extracted text in Firestore
         if text:
+            log(f"Extracted {char_count} characters from {processed_pages} pages")
+            
             # Store text content for search
             pdf_data = {
                 "name": file_name,
@@ -702,23 +747,42 @@ async def process_document(user_id: str, file_path: str, file_name: str, max_cha
                 "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
             }
             
-            # Store file in Firebase Storage
-            file_url = await store_file(user_id, file_path, file_name, "documents")
-            pdf_data["url"] = file_url
+            # Try to store file in Firebase Storage
+            storage_msg = ""
+            try:
+                file_url = await store_file(user_id, file_path, file_name, "documents")
+                if file_url and file_url != file_path:  # Check if we got a real URL back
+                    pdf_data["url"] = file_url
+                    log(f"File stored at URL: {file_url}")
+                else:
+                    storage_msg = "\n\n⚠️ Note: Document couldn't be stored in cloud storage, but text was extracted."
+                    log("Storage returned empty or local URL - storage may not be configured properly", level="WARNING")
+            except Exception as storage_err:
+                storage_msg = "\n\n⚠️ Note: Document couldn't be stored in cloud storage, but text was extracted."
+                log(f"Error storing file: {storage_err}", level="ERROR")
             
-            # Add to user's documents collection
-            loop = asyncio.get_event_loop()
-            doc_ref = db.collection("users").document(str(user_id)).collection("document_contents")
-            await loop.run_in_executor(None, lambda: doc_ref.add(pdf_data))
+            try:
+                # Add to user's documents collection
+                loop = asyncio.get_event_loop()
+                doc_ref = db.collection("users").document(str(user_id)).collection("document_contents")
+                await loop.run_in_executor(None, lambda: doc_ref.add(pdf_data))
+                log("Document text saved to Firestore")
+            except Exception as db_err:
+                log(f"Error saving document text to Firestore: {db_err}", level="ERROR")
+                storage_msg += "\n⚠️ Document text couldn't be saved to database."
             
             # Prepare response message
             truncated_msg = ""
             if processed_pages < total_pages:
                 truncated_msg = f" (Note: Only processed {processed_pages} of {total_pages} pages due to size limits)"
             
-            return f"📄 Document saved: {file_name}\n\nExtracted {char_count} characters of text{truncated_msg}."
+            return f"📄 Document processed: {file_name}\n\nExtracted {char_count} characters of text{truncated_msg}.{storage_msg}"
         else:
-            return f"📄 Document saved: {file_name}\n\nNo text could be extracted."
+            log("No text could be extracted from document")
+            return f"📄 Document received: {file_name}\n\nNo text could be extracted."
+    except Exception as e:
+        log(f"Error processing document: {e}", level="ERROR")
+        return f"⚠️ Error processing document: {file_name}\n\nThere was an issue processing your document. The error has been logged."
     except Exception as e:
         log(f"Error processing document: {e}", level="ERROR")
         return f"📄 Document saved, but there was an error processing it: {str(e)[:100]}"
