@@ -441,13 +441,14 @@ Just chat naturally with me!
                 
                 # Try OCR
                 text = await extract_text_from_image(local_path)
-                if text:                # Store text content for search
-                img_data = {
-                    "name": file_name,
-                    "text": text,
-                    "url": file_url,
-                    "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
-                }
+                if text:
+                    # Store text content for search
+                    img_data = {
+                        "name": file_name,
+                        "text": text,
+                        "url": file_url,
+                        "created_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
+                    }
                     
                     # Add to user's documents collection
                     loop = asyncio.get_event_loop()
