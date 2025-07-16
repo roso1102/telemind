@@ -658,6 +658,18 @@ async def root():
     """Root endpoint for checking if service is running"""
     return {"status": "ok", "message": "TeleMind Bot is running!"}
 
+@app.get("/health")
+@app.head("/health")
+async def health_check():
+    """Health check endpoint for monitoring services like UptimeRobot"""
+    # This endpoint supports both GET and HEAD methods
+    return {
+        "status": "ok", 
+        "service": "TeleMind Bot", 
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0"
+    }
+
 # --- Register webhook with Telegram ---
 @app.on_event("startup")
 async def startup_event():
