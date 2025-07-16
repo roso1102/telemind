@@ -29,6 +29,31 @@ except ImportError:
 def log(msg, *args, level="INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{level}] {timestamp} | {msg}", *args, flush=True)
+    
+# --- OCR Helper ---
+async def extract_text_from_image(image_path: str) -> str:
+    """Extract text from an image using OCR"""
+    try:
+        # Check if pytesseract is available
+        if 'pytesseract' not in globals():
+            log("OCR skipped - pytesseract not installed", level="WARNING")
+            return ""
+            
+        # Process with OCR
+        loop = asyncio.get_event_loop()
+        
+        # Check if a custom Tesseract path is specified
+        tesseract_cmd = os.getenv("TESSERACT_PATH")
+        if tesseract_cmd:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+            
+        # Process image with pytesseract
+        img = Image.open(image_path)
+        result = await loop.run_in_executor(None, lambda: pytesseract.image_to_string(img))
+        return result
+    except Exception as e:
+        log(f"Error extracting text from image: {e}", level="ERROR")
+        return ""
 
 # --- Environment Variables ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
