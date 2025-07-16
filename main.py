@@ -575,12 +575,13 @@ Just chat naturally with me!
     
     # Handle document/file uploads
     elif "document" in message:
-        doc = message["document"]
-        file_id = doc["file_id"]
-        file_name = doc["file_name"]
-        
-        # Get file info and download
-        async with httpx.AsyncClient() as client:
+        try:
+            doc = message["document"]
+            file_id = doc["file_id"]
+            file_name = doc["file_name"]
+            
+            # Get file info and download
+            async with httpx.AsyncClient() as client:
             res = await client.get(f"{API_URL}/getFile?file_id={file_id}")
             file_path = res.json()["result"]["file_path"]
             file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
@@ -631,8 +632,12 @@ Just chat naturally with me!
         # Clean up
         try:
             os.remove(local_path)
-        except:
-            pass
+        except Exception as e:
+            log(f"Error removing temp file: {e}", level="WARNING")
+        
+        except Exception as e:
+            log(f"Error processing document: {e}", level="ERROR")
+            await send_message(chat_id, "Sorry, I encountered an error processing your document.")
             
     # Handle photos
     elif "photo" in message:
