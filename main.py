@@ -214,47 +214,89 @@ async def add_to_user_array(user_id: str, field: str, value: Any):
                               lambda: doc_ref.update({field: firestore.ArrayUnion([value])}))
 
 async def store_file(user_id: str, file_path: str, file_name: str, file_type: str) -> str:
-    """Store file in Firebase Storage and return URL"""
+    """Store file in Firebase Storage and return URL or handle fallback"""
+    # Check if we should use Firebase Storage or local storage
+    use_firebase_storage = os.getenv("USE_FIREBASE_STORAGE", "true").lower() in ["true", "yes", "1"]
+    
     try:
         # Log storage attempt
         log(f"Attempting to store file: {file_name} for user {user_id}")
-        log(f"Firebase bucket name: {bucket.name}")
         
         # Check if the file exists
         if not os.path.exists(file_path):
             log(f"File not found at path: {file_path}", level="ERROR")
             return ""
+            
+        # Check if we should attempt Firebase storage
+        if use_firebase_storage:
+            try:
+                log(f"Using Firebase Storage. Bucket name: {bucket.name}")
+                
+                # Upload to Firebase Storage
+                destination_path = f"users/{user_id}/{file_type}/{file_name}"
+                blob = bucket.blob(destination_path)
+                
+                # Log the upload attempt
+                log(f"Uploading file to Firebase: {destination_path}")
+                
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, lambda: blob.upload_from_filename(file_path))
+                
+                # Make publicly accessible and get URL
+                await loop.run_in_executor(None, lambda: blob.make_public())
+                url = blob.public_url
+                log(f"File uploaded successfully to Firebase. Public URL: {url}")
+                
+                # Store metadata in Firestore
+                file_data = {
+                    "name": file_name,
+                    "type": file_type,
+                    "url": url,
+                    "path": destination_path,
+                    "storage_type": "firebase",
+                    "uploaded_at": time.time()
+                }
+                await add_to_user_array(user_id, "files", file_data)
+                
+                return url
+            except Exception as firebase_error:
+                log(f"Firebase Storage failed: {firebase_error}. Using fallback storage.", level="WARNING")
+        else:
+            log("Firebase Storage disabled by configuration, using fallback storage", level="INFO")
         
-        # Upload to Firebase Storage
-        destination_path = f"users/{user_id}/{file_type}/{file_name}"
-        blob = bucket.blob(destination_path)
+        # ---- Fallback to local storage ----
+        # Create directory structure for local storage
+        local_storage_dir = os.getenv("LOCAL_STORAGE_DIR", "local_storage")
+        user_dir = os.path.join(local_storage_dir, user_id, file_type)
+        os.makedirs(user_dir, exist_ok=True)
         
-        # Log the upload attempt
-        log(f"Uploading file to {destination_path}")
+        # Copy file to local storage
+        local_dest_path = os.path.join(user_dir, file_name)
+        import shutil
+        shutil.copy2(file_path, local_dest_path)
         
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: blob.upload_from_filename(file_path))
+        log(f"File stored locally at: {local_dest_path}")
         
-        # Make publicly accessible and get URL
-        await loop.run_in_executor(None, lambda: blob.make_public())
-        url = blob.public_url
-        log(f"File uploaded successfully. Public URL: {url}")
+        # Generate a relative path for accessing the file
+        base_url = os.getenv("BASE_URL", "https://telemind-bot.onrender.com")
+        file_url = f"{base_url}/files/{user_id}/{file_type}/{file_name}"
         
         # Store metadata in Firestore
         file_data = {
             "name": file_name,
             "type": file_type,
-            "url": url,
-            "path": destination_path,
-            "uploaded_at": time.time()  # Use time.time() instead of Firestore.SERVER_TIMESTAMP
+            "local_path": local_dest_path,
+            "url": file_url,  # This will only work if we set up file serving
+            "storage_type": "local",
+            "uploaded_at": time.time()
         }
         await add_to_user_array(user_id, "files", file_data)
         
-        return url
+        return file_url
     except Exception as e:
-        log(f"Error storing file in Firebase: {e}", level="ERROR")
-        # Return a local file path as fallback
-        return file_path  # Return the local path as a fallback
+        log(f"Error storing file: {e}", level="ERROR")
+        # Return an empty string to indicate failure
+        return ""
 
 # --- API endpoints ---
 @app.get("/", response_model=dict)
@@ -582,8 +624,48 @@ async def debug_env():
         "WEBHOOK_URL_configured": bool(os.getenv("WEBHOOK_URL")),
         "TELEGRAM_BOT_TOKEN_configured": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
         "GROQ_API_KEY_configured": bool(os.getenv("GROQ_API_KEY")),
-        "FIREBASE_SERVICE_ACCOUNT_configured": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT"))
+        "FIREBASE_SERVICE_ACCOUNT_configured": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT")),
+        "FIREBASE_STORAGE_BUCKET": os.getenv("FIREBASE_STORAGE_BUCKET"),
+        "USE_FIREBASE_STORAGE": os.getenv("USE_FIREBASE_STORAGE", "true"),
+        "LOCAL_STORAGE_DIR": os.getenv("LOCAL_STORAGE_DIR", "local_storage"),
+        "BASE_URL": os.getenv("BASE_URL", "https://telemind-bot.onrender.com")
     }
+
+@app.get("/files/{user_id}/{file_type}/{file_name}")
+async def serve_local_file(user_id: str, file_type: str, file_name: str):
+    """Serve locally stored files when Firebase Storage is not available"""
+    try:
+        # Verify user access (you might want to add authentication here)
+        # For now, we'll keep it simple
+        
+        # Construct the local path
+        local_storage_dir = os.getenv("LOCAL_STORAGE_DIR", "local_storage")
+        file_path = os.path.join(local_storage_dir, user_id, file_type, file_name)
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            log(f"Local file not found: {file_path}", level="WARNING")
+            return {"error": "File not found"}
+            
+        # Determine content type
+        content_type = "application/octet-stream"  # Default
+        if file_name.lower().endswith(".pdf"):
+            content_type = "application/pdf"
+        elif file_name.lower().endswith((".jpg", ".jpeg")):
+            content_type = "image/jpeg"
+        elif file_name.lower().endswith(".png"):
+            content_type = "image/png"
+            
+        # Serve the file
+        from fastapi.responses import FileResponse
+        return FileResponse(
+            path=file_path,
+            filename=file_name,
+            media_type=content_type
+        )
+    except Exception as e:
+        log(f"Error serving file: {e}", level="ERROR")
+        return {"error": str(e)}
 
 # --- AI Processing Functions ---
 async def process_conversation(user_id: str, new_message: str) -> str:
