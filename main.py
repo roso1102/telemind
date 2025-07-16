@@ -68,6 +68,24 @@ if not TELEGRAM_BOT_TOKEN:
 groq_client = Groq(api_key=GROQ_API_KEY)
 API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# --- Message processing helpers ---
+async def send_message(chat_id: int, text: str):
+    """Send message to user via Telegram"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{API_URL}/sendMessage", json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "Markdown"
+            })
+            
+            # Check if the response was successful
+            response_data = response.json()
+            if not response_data.get("ok"):
+                log(f"Telegram API error: {response_data}", level="ERROR")
+    except Exception as e:
+        log(f"Error sending message to Telegram: {e}", level="ERROR")
+
 # --- Firebase Initialization ---
 try:
     # Check if Firebase service account is provided as env variable
@@ -134,6 +152,63 @@ class UserSession:
 
 # Active user sessions (memory)
 user_sessions: Dict[str, UserSession] = {}
+
+# --- Firebase helpers ---
+async def get_user_data(user_id: str) -> dict:
+    """Get user data from Firestore"""
+    loop = asyncio.get_event_loop()
+    doc_ref = db.collection("users").document(str(user_id))
+    doc = await loop.run_in_executor(None, doc_ref.get)
+    if not doc.exists:
+        # Initialize user data
+        default_data = {
+            "notes": [],
+            "tasks": [],
+            "files": [],
+            "conversation": [],
+            "created_at": firestore.SERVER_TIMESTAMP
+        }
+        await loop.run_in_executor(None, lambda: doc_ref.set(default_data))
+        return default_data
+    return doc.to_dict()
+
+async def update_user_data(user_id: str, data: dict, merge: bool = True):
+    """Update user data in Firestore"""
+    loop = asyncio.get_event_loop()
+    doc_ref = db.collection("users").document(str(user_id))
+    await loop.run_in_executor(None, lambda: doc_ref.set(data, merge=merge))
+
+async def add_to_user_array(user_id: str, field: str, value: Any):
+    """Add an item to a user's array field"""
+    loop = asyncio.get_event_loop()
+    doc_ref = db.collection("users").document(str(user_id))
+    await loop.run_in_executor(None, 
+                              lambda: doc_ref.update({field: firestore.ArrayUnion([value])}))
+
+async def store_file(user_id: str, file_path: str, file_name: str, file_type: str) -> str:
+    """Store file in Firebase Storage and return URL"""
+    # Upload to Firebase Storage
+    destination_path = f"users/{user_id}/{file_type}/{file_name}"
+    blob = bucket.blob(destination_path)
+    
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: blob.upload_from_filename(file_path))
+    
+    # Make publicly accessible and get URL
+    await loop.run_in_executor(None, lambda: blob.make_public())
+    url = blob.public_url
+    
+    # Store metadata in Firestore
+    file_data = {
+        "name": file_name,
+        "type": file_type,
+        "url": url,
+        "path": destination_path,
+        "uploaded_at": firestore.SERVER_TIMESTAMP
+    }
+    await add_to_user_array(user_id, "files", file_data)
+    
+    return url
 
 # --- API endpoints ---
 @app.get("/", response_model=dict)
@@ -463,6 +538,141 @@ async def debug_env():
         "GROQ_API_KEY_configured": bool(os.getenv("GROQ_API_KEY")),
         "FIREBASE_SERVICE_ACCOUNT_configured": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT"))
     }
+
+# --- AI Processing Functions ---
+async def process_conversation(user_id: str, new_message: str) -> str:
+    """Process user message through LLM and return response"""
+    # Get user session or create new one
+    if user_id not in user_sessions:
+        user_sessions[user_id] = UserSession(user_id)
+        
+    session = user_sessions[user_id]
+    session.last_interaction = time.time()
+    
+    # Add user message to history
+    user_msg = Message(role="user", content=new_message, timestamp=time.time())
+    session.messages.append(user_msg)
+    
+    # Keep only the last N messages for context window
+    if len(session.messages) > session.context_window:
+        session.messages = session.messages[-session.context_window:]
+    
+    # Format conversation for the LLM
+    messages = [{"role": msg.role, "content": msg.content} for msg in session.messages]
+    
+    # Add system prompt
+    system_prompt = """You are TeleMind, a helpful personal assistant on Telegram.
+You help users manage tasks, take notes, and handle files.
+Be friendly and concise in your responses.
+Your goal is to help users organize their lives and provide useful information."""
+    
+    messages.insert(0, {"role": "system", "content": system_prompt})
+    
+    try:
+        # Call Groq API
+        response = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model="llama3-8b-8192",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=800
+        )
+        
+        # Extract response text
+        assistant_response = response.choices[0].message.content
+        
+        # Save assistant response to history
+        assistant_msg = Message(role="assistant", content=assistant_response, timestamp=time.time())
+        session.messages.append(assistant_msg)
+        
+        return assistant_response
+    except Exception as e:
+        log(f"Error calling Groq API: {e}", level="ERROR")
+        return "I apologize, but I encountered an issue processing your request. Please try again."
+
+async def analyze_intent(text: str) -> dict:
+    """Analyze the user's message intent"""
+    # Simple rule-based intent detection
+    text_lower = text.lower()
+    
+    # Check for task creation intent
+    if any(phrase in text_lower for phrase in ["remind me to", "add task", "create task", "remember to", "don't forget to"]):
+        return {"intent": "task_create"}
+    
+    # Check for note creation intent
+    if any(phrase in text_lower for phrase in ["save note", "save this", "take note", "note this", "remember this", "remember that"]):
+        return {"intent": "note_create"}
+    
+    # Default to general conversation
+    return {"intent": "general_chat"}
+
+async def extract_task_info(text: str) -> dict:
+    """Extract task details from user message"""
+    # Simple implementation for now
+    # In a production system, this would use NLP to extract dates, times, etc.
+    
+    text_lower = text.lower()
+    
+    # Check if it's really a task
+    if not any(phrase in text_lower for phrase in ["remind me to", "add task", "create task", "remember to", "don't forget to"]):
+        return {"is_task": False}
+    
+    # Extract potential date patterns
+    date_match = re.search(r'(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}/\d{1,2}|\d{1,2}-\d{1,2})', text_lower)
+    date = date_match.group(1) if date_match else None
+    
+    # Extract potential time patterns
+    time_match = re.search(r'(\d{1,2}:\d{2}|\d{1,2} (am|pm))', text_lower)
+    time = time_match.group(1) if time_match else None
+    
+    # Clean up the task description
+    task = text
+    for prefix in ["remind me to", "add task:", "add task", "create task:", "create task", "remember to", "don't forget to"]:
+        if prefix in text_lower:
+            task = text[text_lower.find(prefix) + len(prefix):].strip()
+            break
+    
+    return {
+        "is_task": True,
+        "task": task,
+        "due_date": date,
+        "due_time": time,
+        "priority": "medium"  # Default priority
+    }
+
+async def process_document(user_id: str, file_path: str, file_name: str) -> str:
+    """Process a PDF document and extract text"""
+    try:
+        # Extract text from PDF
+        text = ""
+        with fitz.open(file_path) as doc:
+            for page in doc:
+                text += page.get_text()
+        
+        # Store the extracted text in Firestore
+        if text:
+            # Store text content for search
+            pdf_data = {
+                "name": file_name,
+                "text": text,
+                "created_at": firestore.SERVER_TIMESTAMP
+            }
+            
+            # Store file in Firebase Storage
+            file_url = await store_file(user_id, file_path, file_name, "documents")
+            pdf_data["url"] = file_url
+            
+            # Add to user's documents collection
+            loop = asyncio.get_event_loop()
+            doc_ref = db.collection("users").document(str(user_id)).collection("document_contents")
+            await loop.run_in_executor(None, lambda: doc_ref.add(pdf_data))
+            
+            return f"📄 Document saved: {file_name}\n\nExtracted {len(text)} characters of text."
+        else:
+            return f"📄 Document saved: {file_name}\n\nNo text could be extracted."
+    except Exception as e:
+        log(f"Error processing document: {e}", level="ERROR")
+        return f"📄 Document saved, but there was an error processing it: {str(e)[:100]}"
 
 # --- Main execution ---
 if __name__ == "__main__":
