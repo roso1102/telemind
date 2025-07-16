@@ -113,8 +113,14 @@ user_sessions: Dict[str, UserSession] = {}
 # --- API endpoints ---
 @app.get("/", response_model=dict)
 @app.head("/", response_model=dict)
+async def root():
+    """Root endpoint"""
+    return {"status": "ok", "service": "TeleMind Bot", "timestamp": time.time()}
+
+@app.get("/health", response_model=dict)
+@app.head("/health", response_model=dict)
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint specifically for monitoring services"""
     return {"status": "ok", "service": "TeleMind Bot", "timestamp": time.time()}
 
 @app.get("/debug", response_model=dict)
