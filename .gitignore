@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+.env
+
+# Firebase
+firebase_service_account.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Downloaded files
+downloads/
+
+# Logs
+*.log
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+client_secret_827469980249-vdrfvtmnnqgqufn5c0q1eqeam2nbvgrb.apps.googleusercontent.com.json
+
+telemind-assistant-5056fd999646.json
