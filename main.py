@@ -96,6 +96,14 @@ class Message(BaseModel):
     role: str
     content: str
     timestamp: Optional[float] = None
+    
+    def dict(self, *args, **kwargs):
+        """Override dict method to handle Firestore timestamps"""
+        result = super().dict(*args, **kwargs)
+        # Ensure timestamp is a simple value, not a Firestore Sentinel
+        if "timestamp" in result and isinstance(result["timestamp"], object) and hasattr(result["timestamp"], "__class__") and "Sentinel" in str(result["timestamp"].__class__):
+            result["timestamp"] = time.time()
+        return result
 
 class UserSession:
     def __init__(self, user_id: str):
@@ -120,7 +128,7 @@ async def get_user_data(user_id: str) -> dict:
             "tasks": [],
             "files": [],
             "conversation": [],
-            "created_at": firestore.SERVER_TIMESTAMP
+            "created_at": firestore.SERVER_TIMESTAMP  # This is fine here as it's not being serialized to JSON
         }
         await loop.run_in_executor(None, lambda: doc_ref.set(default_data))
         return default_data
@@ -239,8 +247,18 @@ Be concise, helpful, and friendly in your responses.
         session.last_interaction = time.time()
         
         # Store the last few messages in Firestore for persistence
-        conversation_to_store = [msg.dict() for msg in session.messages[-5:]]
-        await update_user_data(user_id, {"conversation": conversation_to_store})
+        try:
+            conversation_to_store = []
+            for msg in session.messages[-5:]:
+                msg_dict = msg.dict()
+                # Ensure timestamp is a simple numeric value
+                if "timestamp" in msg_dict and msg_dict["timestamp"] is not None:
+                    msg_dict["timestamp"] = float(msg_dict["timestamp"])
+                conversation_to_store.append(msg_dict)
+            
+            await update_user_data(user_id, {"conversation": conversation_to_store})
+        except Exception as e:
+            log(f"Error storing conversation: {e}", level="ERROR")
         
         return assistant_response
         
@@ -521,7 +539,7 @@ Just chat naturally with me!
                     "due_time": task_info.get("due_time"),
                     "priority": task_info.get("priority", "medium"),
                     "completed": False,
-                    "created_at": firestore.SERVER_TIMESTAMP
+                    "created_at": firestore.SERVER_TIMESTAMP  # This is fine here as it's going directly to Firestore
                 }
                 
                 await add_to_user_array(user_id, "tasks", task_data)
@@ -752,10 +770,20 @@ async def setup_periodic_tasks():
                 for user_id, session in user_sessions.items():
                     # If session is older than 30 minutes, save to Firestore and remove
                     if now - session.last_interaction > 1800:  # 30 minutes
-                        # Save conversation to Firestore before removing
-                        conversation_to_store = [msg.dict() for msg in session.messages[-5:]]
-                        await update_user_data(user_id, {"conversation": conversation_to_store})
-                        users_to_remove.append(user_id)
+                        try:
+                            # Save conversation to Firestore before removing
+                            conversation_to_store = []
+                            for msg in session.messages[-5:]:
+                                msg_dict = msg.dict()
+                                # Ensure timestamp is a simple numeric value
+                                if "timestamp" in msg_dict and msg_dict["timestamp"] is not None:
+                                    msg_dict["timestamp"] = float(msg_dict["timestamp"])
+                                conversation_to_store.append(msg_dict)
+                            
+                            await update_user_data(user_id, {"conversation": conversation_to_store})
+                            users_to_remove.append(user_id)
+                        except Exception as e:
+                            log(f"Error storing conversation during cleanup: {e}", level="ERROR")
                 
                 # Remove stale sessions
                 for user_id in users_to_remove:
