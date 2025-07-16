@@ -425,7 +425,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         # Even with error, return success to Telegram to prevent retries
         return {"ok": True}
     
-    # Handle text messages
+    # Handle all types of messages in a single try-except block
     try:
         if "text" in message:
             text = message["text"]
@@ -569,22 +569,18 @@ Just chat naturally with me!
         # Default: process as conversation
         response = await process_conversation(user_id, text)
         await send_message(chat_id, response)
-    except Exception as e:
-        log(f"Error processing text message: {e}", level="ERROR")
-        await send_message(chat_id, "Sorry, I encountered an error processing your message. Please try again.")
-    
+        
     # Handle document/file uploads
     elif "document" in message:
-        try:
             doc = message["document"]
             file_id = doc["file_id"]
             file_name = doc["file_name"]
             
             # Get file info and download
             async with httpx.AsyncClient() as client:
-            res = await client.get(f"{API_URL}/getFile?file_id={file_id}")
-            file_path = res.json()["result"]["file_path"]
-            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+                res = await client.get(f"{API_URL}/getFile?file_id={file_id}")
+                file_path = res.json()["result"]["file_path"]
+                file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
             
             # Download file
             local_path = f"downloads/{file_id}_{file_name}"
@@ -634,14 +630,9 @@ Just chat naturally with me!
             os.remove(local_path)
         except Exception as e:
             log(f"Error removing temp file: {e}", level="WARNING")
-        
-        except Exception as e:
-            log(f"Error processing document: {e}", level="ERROR")
-            await send_message(chat_id, "Sorry, I encountered an error processing your document.")
             
     # Handle photos
     elif "photo" in message:
-        try:
             # Get the largest photo
             photo = message["photo"][-1]  # Last is the largest
             file_id = photo["file_id"]
@@ -692,9 +683,6 @@ Just chat naturally with me!
                 os.remove(local_path)
             except Exception as e:
                 log(f"Error removing temp file: {e}", level="WARNING")
-        except Exception as e:
-            log(f"Error processing photo: {e}", level="ERROR")
-            await send_message(chat_id, "Sorry, I encountered an error processing your photo.")
     
     except Exception as e:
         log(f"Unhandled error in webhook handler: {e}", level="ERROR")
