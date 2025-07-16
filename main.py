@@ -167,12 +167,20 @@ async def store_file(user_id: str, file_path: str, file_name: str, file_type: st
 # --- Message processing ---
 async def send_message(chat_id: int, text: str):
     """Send message to user via Telegram"""
-    async with httpx.AsyncClient() as client:
-        await client.post(f"{API_URL}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
-        })
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{API_URL}/sendMessage", json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "Markdown"
+            })
+            
+            # Check if the response was successful
+            response_data = response.json()
+            if not response_data.get("ok"):
+                log(f"Telegram API error: {response_data}", level="ERROR")
+    except Exception as e:
+        log(f"Error sending message to Telegram: {e}", level="ERROR")
 
 async def process_conversation(user_id: str, new_message: str) -> str:
     """Process user message through Groq and return response"""
@@ -383,28 +391,35 @@ async def process_document(user_id: str, file_path: str, file_name: str) -> str:
 @app.post("/webhook")
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     """Handle incoming Telegram webhook"""
-    data = await request.json()
-    log(f"Received webhook: {data}")
-    
-    if "message" not in data:
+    try:
+        data = await request.json()
+        log(f"Received webhook: {data}")
+        
+        if "message" not in data:
+            log("No message in webhook data", level="WARNING")
+            return {"ok": True}
+        
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+        user_id = str(message["from"]["id"])
+    except Exception as e:
+        log(f"Error parsing webhook data: {e}", level="ERROR")
+        # Even with error, return success to Telegram to prevent retries
         return {"ok": True}
     
-    message = data["message"]
-    chat_id = message["chat"]["id"]
-    user_id = str(message["from"]["id"])
-    
     # Handle text messages
-    if "text" in message:
-        text = message["text"]
-        log(f"Handling message: {text} from user {user_id}")
-        
-        # Process commands
-        if text.startswith("/"):
-            cmd = text.split()[0].lower()
+    try:
+        if "text" in message:
+            text = message["text"]
+            log(f"Handling message: {text} from user {user_id}")
             
-            if cmd == "/start":
-                await send_message(chat_id, "👋 Hello! I'm your personal assistant. I can help you with tasks, notes, and files. How can I assist you today?")
-                return {"ok": True}
+            # Process commands
+            if text.startswith("/"):
+                cmd = text.split()[0].lower()
+                
+                if cmd == "/start":
+                    await send_message(chat_id, "👋 Hello! I'm your personal assistant. I can help you with tasks, notes, and files. How can I assist you today?")
+                    return {"ok": True}
                 
             elif cmd == "/help":
                 help_text = """
@@ -600,54 +615,67 @@ Just chat naturally with me!
             
     # Handle photos
     elif "photo" in message:
-        # Get the largest photo
-        photo = message["photo"][-1]  # Last is the largest
-        file_id = photo["file_id"]
-        
-        # Generate a filename
-        file_name = f"photo_{int(time.time())}.jpg"
-        
-        # Get file info and download
-        async with httpx.AsyncClient() as client:
-            res = await client.get(f"{API_URL}/getFile?file_id={file_id}")
-            file_path = res.json()["result"]["file_path"]
-            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
-            
-            # Download file
-            local_path = f"downloads/{file_id}_{file_name}"
-            os.makedirs("downloads", exist_ok=True)
-            
-            file_data = await client.get(file_url)
-            with open(local_path, "wb") as f:
-                f.write(file_data.content)
-        
-        # Process image
-        await send_message(chat_id, "🖼 Processing image...")
-        file_url = await store_file(user_id, local_path, file_name, "images")
-        
-        # Try OCR
-        text = await extract_text_from_image(local_path)
-        if text:
-            # Store text content for search
-            img_data = {
-                "name": file_name,
-                "text": text,
-                "url": file_url,
-                "created_at": firestore.SERVER_TIMESTAMP
-            }
-            
-            # Add to user's documents collection
-            loop = asyncio.get_event_loop()
-            doc_ref = db.collection("users").document(str(user_id)).collection("document_contents")
-            await loop.run_in_executor(None, lambda: doc_ref.add(img_data))
-            
-            await send_message(chat_id, f"🖼 Image saved!\n\nText extracted: {text[:100]}...")
-        else:
-            await send_message(chat_id, "🖼 Image saved!")
-            
-        # Clean up
         try:
-            os.remove(local_path)
+            # Get the largest photo
+            photo = message["photo"][-1]  # Last is the largest
+            file_id = photo["file_id"]
+            
+            # Generate a filename
+            file_name = f"photo_{int(time.time())}.jpg"
+            
+            # Get file info and download
+            async with httpx.AsyncClient() as client:
+                res = await client.get(f"{API_URL}/getFile?file_id={file_id}")
+                file_path = res.json()["result"]["file_path"]
+                file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+                
+                # Download file
+                local_path = f"downloads/{file_id}_{file_name}"
+                os.makedirs("downloads", exist_ok=True)
+                
+                file_data = await client.get(file_url)
+                with open(local_path, "wb") as f:
+                    f.write(file_data.content)
+            
+            # Process image
+            await send_message(chat_id, "🖼 Processing image...")
+            file_url = await store_file(user_id, local_path, file_name, "images")
+            
+            # Try OCR
+            text = await extract_text_from_image(local_path)
+            if text:
+                # Store text content for search
+                img_data = {
+                    "name": file_name,
+                    "text": text,
+                    "url": file_url,
+                    "created_at": firestore.SERVER_TIMESTAMP
+                }
+                
+                # Add to user's documents collection
+                loop = asyncio.get_event_loop()
+                doc_ref = db.collection("users").document(str(user_id)).collection("document_contents")
+                await loop.run_in_executor(None, lambda: doc_ref.add(img_data))
+                
+                await send_message(chat_id, f"🖼 Image saved!\n\nText extracted: {text[:100]}...")
+            else:
+                await send_message(chat_id, "🖼 Image saved!")
+                
+            # Clean up
+            try:
+                os.remove(local_path)
+            except Exception as e:
+                log(f"Error removing temp file: {e}", level="WARNING")
+        except Exception as e:
+            log(f"Error processing photo: {e}", level="ERROR")
+            await send_message(chat_id, "Sorry, I encountered an error processing your photo.")
+    
+    except Exception as e:
+        log(f"Unhandled error in webhook handler: {e}", level="ERROR")
+        # Try to send a message to the user if possible
+        try:
+            if chat_id:
+                await send_message(chat_id, "Sorry, I encountered an unexpected error. Please try again.")
         except:
             pass
     
@@ -668,6 +696,19 @@ async def health_check():
         "service": "TeleMind Bot", 
         "timestamp": datetime.now().isoformat(),
         "version": "1.0.0"
+    }
+
+@app.get("/debug")
+async def debug_info():
+    """Debug endpoint with basic information"""
+    return {
+        "status": "ok",
+        "webhook_url_configured": bool(os.getenv("WEBHOOK_URL")),
+        "webhook_url": os.getenv("WEBHOOK_URL", "Not set"),
+        "telegram_token_configured": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+        "groq_api_configured": bool(os.getenv("GROQ_API_KEY")),
+        "firebase_configured": firebase_admin.get_app() is not None,
+        "server_time": datetime.now().isoformat()
     }
 
 # --- Register webhook with Telegram ---
