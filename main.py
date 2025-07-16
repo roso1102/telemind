@@ -49,14 +49,36 @@ API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # --- Firebase Initialization ---
 try:
-    # If running on local development
-    cred = credentials.Certificate("firebase_service_account.json")
-    firebase_admin.initialize_app(cred, {
-        'storageBucket': 'telemind-bot.appspot.com'  # Replace with your bucket
-    })
+    # Check if Firebase service account is provided as env variable
+    firebase_service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT")
+    if firebase_service_account:
+        # Create temporary file with the service account JSON
+        import tempfile
+        import json
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, 'w') as tmp:
+            tmp.write(firebase_service_account)
+        
+        cred = credentials.Certificate(path)
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': 'telemindbot-f271b.appspot.com'  # Your bucket name
+        })
+        
+        # Clean up the temporary file
+        os.remove(path)
+    else:
+        # If running on local development with file
+        try:
+            cred = credentials.Certificate("firebase_service_account.json")
+            firebase_admin.initialize_app(cred, {
+                'storageBucket': 'telemindbot-f271b.appspot.com'  # Your bucket name
+            })
+        except Exception as e:
+            log(f"Local Firebase initialization error: {e}", level="ERROR")
+            # Last resort - try app default credentials
+            firebase_admin.initialize_app()
 except Exception as e:
     log(f"Firebase initialization error: {e}", level="ERROR")
-    # Fallback to environment variables if in production
     try:
         firebase_admin.initialize_app()
     except ValueError:
