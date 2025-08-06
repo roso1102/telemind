@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union, Any
 
 # --- Core Dependencies ---
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request, BackgroundTasks, Query, Depends
 import httpx
 from groq import Groq
 from pydantic import BaseModel
@@ -16,6 +16,8 @@ from pydantic import BaseModel
 import firebase_admin
 from firebase_admin import credentials, firestore
 from firebase_admin import storage as firebase_storage
+
+# --- No Google Drive Integration ---
 
 # --- PDF Processing ---
 import fitz  # PyMuPDF
@@ -214,9 +216,8 @@ async def add_to_user_array(user_id: str, field: str, value: Any):
                               lambda: doc_ref.update({field: firestore.ArrayUnion([value])}))
 
 async def store_file(user_id: str, file_path: str, file_name: str, file_type: str) -> str:
-    """Store file in Firebase Storage and return URL or handle fallback"""
-    # Check if we should use Firebase Storage or local storage
-    use_firebase_storage = os.getenv("USE_FIREBASE_STORAGE", "true").lower() in ["true", "yes", "1"]
+    """Store file in Firebase Storage (if enabled) or locally with enhanced metadata"""
+    use_firebase_storage = os.getenv("USE_FIREBASE_STORAGE", "false").lower() in ["true", "yes", "1"]
     
     try:
         # Log storage attempt
@@ -227,44 +228,39 @@ async def store_file(user_id: str, file_path: str, file_name: str, file_type: st
             log(f"File not found at path: {file_path}", level="ERROR")
             return ""
             
-        # Check if we should attempt Firebase storage
+        # --- OPTION 1: Try Firebase Storage if enabled (with enhanced metadata) ---
         if use_firebase_storage:
             try:
-                log(f"Using Firebase Storage. Bucket name: {bucket.name}")
+                # Import helper module
+                from firebase_storage_helper import upload_file
+                log(f"Using Firebase Storage with enhanced metadata")
                 
-                # Upload to Firebase Storage
-                destination_path = f"users/{user_id}/{file_type}/{file_name}"
-                blob = bucket.blob(destination_path)
+                # Upload file with enhanced metadata
+                result = await asyncio.to_thread(
+                    upload_file, 
+                    user_id, 
+                    file_path, 
+                    file_name, 
+                    file_type, 
+                    extract_metadata=True
+                )
                 
-                # Log the upload attempt
-                log(f"Uploading file to Firebase: {destination_path}")
-                
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, lambda: blob.upload_from_filename(file_path))
-                
-                # Make publicly accessible and get URL
-                await loop.run_in_executor(None, lambda: blob.make_public())
-                url = blob.public_url
-                log(f"File uploaded successfully to Firebase. Public URL: {url}")
-                
-                # Store metadata in Firestore
-                file_data = {
-                    "name": file_name,
-                    "type": file_type,
-                    "url": url,
-                    "path": destination_path,
-                    "storage_type": "firebase",
-                    "uploaded_at": time.time()
-                }
-                await add_to_user_array(user_id, "files", file_data)
+                if result.get("success"):
+                    url = result["url"]
+                    log(f"File uploaded successfully to Firebase. Public URL: {url}")
+                    
+                    # Note: Metadata is already stored in Firestore by the upload_file function
+                    return url
+                else:
+                    log(f"Firebase Storage upload failed: {result.get('error')}. Using fallback storage.", level="WARNING")
                 
                 return url
             except Exception as firebase_error:
                 log(f"Firebase Storage failed: {firebase_error}. Using fallback storage.", level="WARNING")
         else:
-            log("Firebase Storage disabled by configuration, using fallback storage", level="INFO")
+            log("Firebase Storage disabled or failed, using local storage", level="INFO")
         
-        # ---- Fallback to local storage ----
+        # --- OPTION 3: Fallback to local storage ---
         # Create directory structure for local storage
         local_storage_dir = os.getenv("LOCAL_STORAGE_DIR", "local_storage")
         user_dir = os.path.join(local_storage_dir, user_id, file_type)
@@ -275,20 +271,39 @@ async def store_file(user_id: str, file_path: str, file_name: str, file_type: st
         import shutil
         shutil.copy2(file_path, local_dest_path)
         
+        # Extract metadata for better referencing (even for local storage)
+        try:
+            from firebase_storage_helper import extract_pdf_metadata, extract_text_preview, create_file_hash
+            
+            metadata = {}
+            content_preview = ""
+            file_hash = ""
+            
+            if file_type == 'pdf':
+                metadata = extract_pdf_metadata(file_path)
+                content_preview = extract_text_preview(file_path, max_chars=500)
+                file_hash = create_file_hash(file_path)
+        except Exception as e:
+            log(f"Error extracting file metadata: {e}", level="WARNING")
+        
         log(f"File stored locally at: {local_dest_path}")
         
         # Generate a relative path for accessing the file
         base_url = os.getenv("BASE_URL", "https://telemind-bot.onrender.com")
         file_url = f"{base_url}/files/{user_id}/{file_type}/{file_name}"
         
-        # Store metadata in Firestore
+        # Store enhanced metadata in Firestore
         file_data = {
             "name": file_name,
             "type": file_type,
             "local_path": local_dest_path,
-            "url": file_url,  # This will only work if we set up file serving
+            "url": file_url,
             "storage_type": "local",
-            "uploaded_at": time.time()
+            "uploaded_at": time.time(),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "metadata": metadata if 'metadata' in locals() else {},
+            "content_preview": content_preview if 'content_preview' in locals() else "",
+            "file_hash": file_hash if 'file_hash' in locals() else ""
         }
         await add_to_user_array(user_id, "files", file_data)
         
@@ -377,6 +392,7 @@ I can help you with:
 - Send me any PDF, image, or document
 - "What did that PDF about marketing say?"
 - "Find information about pancreatic cells"
+- Use "/files" to see your uploaded files
 
 Just chat naturally with me!
 """
@@ -423,20 +439,15 @@ Just chat naturally with me!
                         await send_message(chat_id, reply)
                     return {"ok": True}
                     
-                elif cmd == "/files":
-                    # Get user files
-                    user_data = await get_user_data(user_id)
-                    files = user_data.get("files", [])
+                elif cmd.startswith("/files"):
+                    # Use the enhanced file listing command
+                    from file_commands import handle_files_command
                     
-                    if not files:
-                        await send_message(chat_id, "📭 You don't have any files yet.")
-                    else:
-                        reply = "🗂 *Your Files*:\n\n"
-                        for i, file in enumerate(files, 1):
-                            file_type_emoji = "📄" if file.get("type") == "documents" else "🖼" if file.get("type") == "images" else "📁"
-                            reply += f"{i}. {file_type_emoji} [{file['name']}]({file['url']})\n"
-                        
-                        await send_message(chat_id, reply)
+                    # Check for any arguments (e.g., /files pdf)
+                    cmd_parts = text.strip().split()
+                    args = cmd_parts[1:] if len(cmd_parts) > 1 else None
+                    
+                    await handle_files_command(user_id, chat_id, args)
                     return {"ok": True}
             
             # Process intent for non-command messages

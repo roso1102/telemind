@@ -5,7 +5,7 @@ TeleMind Bot is a powerful Telegram assistant that combines ChatGPT-like intelli
 ## Features
 
 ### Conversational AI with Memory
-- Understands natural language (powered by LLaMA3)
+- Understands natural language (powered by Groq LLM models)
 - Remembers tasks, notes, and conversations across sessions
 - Can be told to "remember" or "remind me at..." and actually notify you
 
@@ -28,57 +28,75 @@ TeleMind Bot is a powerful Telegram assistant that combines ChatGPT-like intelli
 
 ### 1. Prerequisites
 - Python 3.9+
-- A Telegram bot token (from @BotFather)
-- A Groq API key
-- Firebase project with Firestore and Storage
+- Firebase project (for database & storage)
+- Telegram Bot token (via BotFather)
+- Groq API key (for LLM access)
 
-### 2. Environment Setup
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/telemind-bot.git
-cd telemind-bot
-
-# Setup using script (Unix/Mac)
-chmod +x setup.sh
-./setup.sh
-
-# OR for Windows
-.\setup.ps1
-
-# Edit the .env file with your credentials
+### 2. Environment Variables
+Set the following environment variables:
+```
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+GROQ_API_KEY=your_groq_api_key
+FIREBASE_SERVICE_ACCOUNT=your_firebase_service_account_json
 ```
 
-### 3. Run the Bot
+### 3. Installation
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Running Locally
 ```bash
 uvicorn main:app --reload
 ```
+
+### 5. Deploying to Render
+1. Create a new Web Service on Render
+2. Point to your GitHub repo with this code
+3. Set the build command: `pip install -r requirements.txt`
+4. Set the start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+5. Add the environment variables mentioned above
+
+## Troubleshooting
+
+### Bot Not Responding
+1. Check webhook status using `check_webhook.py`:
+```bash
+python check_webhook.py --check
+```
+
+2. Set a new webhook if needed:
+```bash
+python check_webhook.py --set https://your-render-url.onrender.com/webhook
+```
+
+### Fixing Syntax Errors
+If you encounter syntax errors in the webhook handler:
+1. Use the fixed version in `fixed_main.py` 
+2. Copy it over to `main.py`:
+```bash
+cp fixed_main.py main.py
+```
+
+### 404 Errors
+The bot now has a proper health endpoint at the root path (`/`) that supports both GET and HEAD requests. UptimeRobot can use this to monitor the service.
+
+### Firebase Issues
+Make sure your FIREBASE_SERVICE_ACCOUNT environment variable contains the full JSON of your service account credentials.
 
 ## Technical Stack
 
 | Feature | Tool |
 |---------|------|
 | Bot backend | Python + FastAPI |
-| AI processing | Groq API (LLaMA3) |
+| AI processing | Groq API |
 | Database | Firebase Firestore |
-| Reminders | Firestore timestamps |
 | File Storage | Firebase Storage |
 | PDF Processing | PyMuPDF |
 | OCR | Tesseract OCR |
 
-## Deployment Options
-
-See the [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for detailed instructions on:
-- Deploying to Render
-- Deploying to Fly.io
-- Deploying to Railway
-- Managing Firebase in production
-
-## Development Roadmap
-
-- **Vector Search Implementation**: Add embeddings for semantic search
-- **Multi-user Support**: Add user authentication and profiles  
-- **Dashboard**: Web UI for managing tasks, notes, and files
-- **Advanced Document Analysis**: More sophisticated document processing
+## License
+MIT License
 
 ## Original Requirements
 The initial project requirements are preserved in [README_ORIGINAL.md](README_new.md)
